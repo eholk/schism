@@ -399,7 +399,7 @@
     (memq x '(%read-mem %store-mem %get-tag %set-tag %as-fixnum bitwise-and
                         bitwise-not bitwise-ior bitwise-arithmetic-shift-left
                         bitwise-arithmetic-shift-right eof-object + * - / %set-car!
-                        %set-cdr! %unreachable)))
+                        %set-cdr! %unreachable %void)))
 
   (define (relop? x)
     (memq x '(eq? neq? <)))
@@ -424,7 +424,7 @@
 	  (cons (car expr) (expand-macros* (cdr expr)))
 	  (map (lambda (e) (expand-macros-quasiquote e)) expr)))
      (else expr)))
-    
+
   (define (expand-macros expr)
     (if (pair? expr)
         (let ((tag (car expr)))
@@ -438,7 +438,7 @@
                     (expand-macros (cadr expr))
                     (let ((t (gensym "t")))
                       `(let ((,t ,(expand-macros (cadr expr))))
-                         (if ,t ,t ,(expand-macros (cons 'or (cddr expr)))))))))
+                         (if ,t ,t ,(expand-macros (cons tag (cddr expr)))))))))
            ((eq? tag 'and)
             (if (null? (cdr expr))
                 #t
@@ -446,7 +446,7 @@
                     (expand-macros (cadr expr))
                     (let ((t (gensym "t")))
                       `(let ((,t ,(expand-macros (cadr expr))))
-                         (if ,t ,(expand-macros (cons 'and (cddr expr))) #f))))))
+                         (if ,t ,(expand-macros (cons tag (cddr expr))) #f))))))
            ((eq? tag 'not)
             `(if ,(expand-macros (cadr expr)) #f #t))
            ((eq? tag 'cond)
@@ -505,7 +505,9 @@
                                   (extend-parse-env (let-binding-names (cadr expr)) env))))
             `(let ,bindings ,body)))
          ((eq? op 'begin)
-          (cons 'begin (parse-exprs (cdr expr) env)))
+	  (if (null? (cdr expr))
+	      `(%void)
+	      (cons 'begin (parse-exprs (cdr expr) env))))
          ((eq? op 'lambda)
           (let ((args (cadr expr))
                 (body (caddr expr))) ;; for now allow single-expression bodies
@@ -556,7 +558,9 @@
         (cons (parse-expr (car body*) env) (parse-body* (cdr body*) env))))
   (define (parse-body body env)
     ;; expr ... -> (begin expr ...)
-    (cons 'begin (parse-body* body env)))
+    (if (and (pair? body) (null? (cdr body)))
+	(parse-expr (car body) env)
+	(cons 'begin (parse-body* body env))))
   (define (parse-function function env)
     (let ((type (car function)))
       (cond
@@ -738,7 +742,7 @@
 		 (union free-vars (find-free-vars expr)))
 	       '()
 	       expr*))
-  
+
 
   (define (union a b)
     (cond
@@ -787,12 +791,11 @@
       (map (lambda (f)
   	     (if (eq? (car f) wasm-import)
   		 f
-  		 (cons (car f)
-  		       (replace-tail-calls-expr (cadr f) #t))))
+  		 `(,(car f)
+		   ,(replace-tail-calls-expr (cadr f) #t))))
 	   fns)))
   (define (replace-tail-calls-begin expr tail?)
     (cond
-     ((null? expr) expr)
      ((null? (cdr expr))
       (cons (replace-tail-calls-expr (car expr) tail?) '()))
      (else (cons (replace-tail-calls-expr (car expr) #f)
@@ -830,14 +833,12 @@
 	       ,(replace-tail-calls-expr (caddr expr) tail?)))
        (else (begin (trace-value expr)
 		    (error 'replace-tail-calls-expr "unrecognized expr"))))))
-  
+
   ;; ====================== ;;
   ;; Apply representation   ;;
   ;; ====================== ;;
   (define (apply-representation fn*)
-    (if (null? fn*)
-        '()
-        (cons (apply-representation-fn (car fn*)) (apply-representation (cdr fn*)))))
+    (map (lambda (fn) (apply-representation-fn fn)) fn*))
   (define (apply-representation-fn fn)
     (if (eq? (car fn) '%wasm-import)
         fn
@@ -850,6 +851,8 @@
           (cond
            ((eq? tag 'null)
             `(ptr ,(constant-null)))
+	   ((eq? tag '%void)
+	    `(ptr ,(constant-void)))
            ((eq? tag 'bool)
             `(ptr ,(if (cadr expr)
                        (constant-true)
@@ -861,9 +864,9 @@
            ((eq? tag 'var) expr)
            ((eq? tag 'number) `(ptr ,(bitwise-arithmetic-shift-left (cadr expr) (tag-size))))
            ((eq? tag 'eof-object) `(ptr ,(constant-eof)))
-           ((eq? tag 'call)
-            (cons 'call (cons (cadr expr) (apply-representation-expr* (cddr expr)))))
-           ((eq? tag 'apply-procedure)
+           ((or (eq? tag 'call) (eq? tag 'tail-call))
+            (cons tag (cons (cadr expr) (apply-representation-expr* (cddr expr)))))
+           ((or (eq? tag 'apply-procedure) (eq? tag 'tail-apply-procedure))
             (cons 'apply-procedure (apply-representation-expr* (cdr expr))))
            ((eq? tag 'if)
             (let ((t (cadr expr))
@@ -942,7 +945,8 @@
        ((eq? tag 'var) `(get-local ,(cdr (or (assq (cadr expr) env)
 					     (begin (trace-value (cadr expr))
 						    (error 'compile-expr "unbound local"))))))
-       ((eq? tag 'call) (cons 'call (cons (cadr expr) (compile-exprs (cddr expr) env))))
+       ((or (eq? tag 'call) (eq? tag 'tail-call))
+	(cons tag (cons (cadr expr) (compile-exprs (cddr expr) env))))
        ((eq? tag 'apply-procedure)
 	(let ((args (args->types (cdr expr))))
 	  `(call-indirect (fn ,args (i32))
@@ -950,6 +954,14 @@
 				     `((i32.load (offset 0)
 						 (i32.and (i32.const ,(fixnum-mask))
 							  ,(compile-expr (cadr expr) env))))))))
+       ((eq? tag 'tail-apply-procedure)
+	(let ((args (args->types (cdr expr))))
+	  `(tail-call-indirect
+	    (fn ,args (i32))
+	    . ,(append (compile-exprs (cdr expr) env)
+		       `((i32.load (offset 0)
+				   (i32.and (i32.const ,(fixnum-mask))
+					    ,(compile-expr (cadr expr) env))))))))
        ((eq? tag 'if)
         (let ((t (cadr expr))
               (c (caddr expr))
@@ -1085,9 +1097,9 @@
       (cond
        ((eq? tag 'begin)
         (count-locals-exprs (cdr body)))
-       ((eq? tag 'call)
+       ((or (eq? tag 'call) (eq? tag 'tail-call))
         (count-locals-exprs (cddr body)))
-       ((eq? tag 'call-indirect)
+       ((or (eq? tag 'call-indirect) (eq? tag 'tail-call-indirect))
 	(count-locals-exprs (cddr body)))
        ((eq? tag 'get-local) (+ 1 (cadr body)))
        ((eq? tag 'set-local) (+ 1 (cadr body)))
@@ -1209,11 +1221,12 @@
 			,(resolve-calls-expr (caddr expr) env types))
 	    `(set-local ,(cadr expr))))
        ((eq? tag 'begin) (cons 'begin (resolve-calls-exprs (cdr expr) env types)))
-       ((eq? tag 'call) (cons 'call (cons (index-of (cadr expr) env)
-					  (resolve-calls-exprs (cddr expr) env types))))
-       ((eq? tag 'call-indirect)
+       ((or (eq? tag 'call) (eq? tag 'tail-call))
+	(cons tag (cons (index-of (cadr expr) env)
+			(resolve-calls-exprs (cddr expr) env types))))
+       ((or (eq? tag 'call-indirect) (eq? tag 'tail-call-indirect))
 	(let ((type-id (lookup-type (cadr expr) types)))
-	  `(call-indirect ,type-id . ,(resolve-calls-exprs (cddr expr) env types))))
+	  `(,tag ,type-id . ,(resolve-calls-exprs (cddr expr) env types))))
        ((eq? tag '%function-index)
 	`(i32.const ,(index-of (cadr expr) env)))
        ((eq? tag 'if)
@@ -1391,6 +1404,12 @@
        ((eq? tag 'call-indirect)
 	`(,(encode-exprs (cddr expr))
 	  (#x11 ,(number->leb-u8-list (cadr expr)) #x00)))
+       ((eq? tag 'tail-call)
+        (cons (encode-exprs (cddr expr))
+              (cons #x12 (number->leb-u8-list (cadr expr)))))
+       ((eq? tag 'tail-call-indirect)
+	`(,(encode-exprs (cddr expr))
+	  (#x13 ,(number->leb-u8-list (cadr expr)) #x00)))
        ((eq? tag 'if)
         (let ((t (cadr expr))
               (c (caddr expr))

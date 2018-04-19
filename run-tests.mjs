@@ -30,7 +30,7 @@ Error.stackTraceLimit = 20;
 
 async function runTest(name, compile = compileWithHostScheme) {
     const bytes = fs.readFileSync(name);
-    const file = await compile(bytes);
+    const file = await compile(bytes, `${name} with`);
 
     const engine = new Schism.Engine;
     const wasm = await engine.loadWasmModule(file);
