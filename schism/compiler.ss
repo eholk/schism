@@ -167,8 +167,8 @@
        (define (vector-set! v i c)
          (if (and (vector? v)
                   (< i (vector-length v)))
-             (begin 
-               (%store-mem v (* ,(word-size) (+ i 1)) c)
+             (begin
+               (%store-mem (%as-fixnum v) (* ,(word-size) (+ i 1)) c)
                (begin))
              (error 'vector-set! "Invalid arguments")))
        (define (vector-ref v i)
@@ -524,7 +524,7 @@
 	  (cons (car expr) (map expand-macros (cdr expr)))
 	  (map (lambda (e) (expand-macros-quasiquote e)) expr)))
      (else expr)))
-    
+
   (define (expand-macros expr)
     (if (pair? expr)
         (let ((tag (car expr)))
@@ -933,16 +933,16 @@
                  (let ((closure-var (gensym "closure-var")))
                    `(let ((,closure-var (call %alloc (number ,(closure-tag))
                                               (number ,(max 2 (+ 1 (length free-vars)))))))
-                      (begin (icall %store-mem (var ,closure-var) (number 0)
-                                    (%function-index ,body-tag))
+                      (begin (icall %store-mem (icall %as-fixnum (var ,closure-var)) (number 0)
+					 (%function-index ,body-tag))
                              . ,(generate-save-free-vars closure-var free-vars 1)))))))
        (else (begin (display expr) (newline)
                     (error 'annotate-free-vars-expr "unrecognized expr"))))))
   (define (generate-save-free-vars closure free-vars index)
     (if (null? free-vars)
 	`((var ,closure))
-	(cons `(icall %store-mem (var ,closure) (number ,(* index (word-size)))
-		      (var ,(car free-vars)))
+	(cons `(icall %store-mem (icall %as-fixnum (var ,closure)) (number ,(* index (word-size)))
+			   (var ,(car free-vars)))
 	      (generate-save-free-vars closure (cdr free-vars) (+ 1 index)))))
   (define (annotate-free-vars-bindings bindings bodies)
     (map (lambda (binding)
@@ -982,7 +982,7 @@
 		 (union free-vars (find-free-vars expr)))
 	       '()
 	       expr*))
-  
+
   (define (union a b)
     (cond
      ((null? a) b)
@@ -1091,23 +1091,25 @@
 	     `(,name ,(lower-strings-expr expr))))
 	 bindings))
   (define (lower-string s)
-    (let ((chars (string->list s))
-	  (string-var (gensym "string")))
-      `(let ((,string-var (call make-string (number ,(length chars)))))
-	 (begin
-           (begin . ,(for-index (lambda (i c)
-                                  `(call string-set! (var ,string-var)
-                                         (number ,i) (char ,c)))
-                                chars))
-           (var ,string-var)))))
+    (let ((string-var (gensym "string"))
+          (fx-var (gensym "string-fx")))
+      `(let ((,string-var (call make-string (number ,(string-length s)))))
+         (let ((,fx-var (icall %as-fixnum (var ,string-var))))
+           (begin . ,(for-string-index-end
+                      (lambda (i c)
+                        `(icall %store-mem (var ,fx-var)
+                                     (number ,(* (+ 1 i) (word-size)))
+                                     (char ,c)))
+                      s
+                      `((var ,string-var))))))))
 
-  (define (for-index p ls)
-    (for-index-helper p ls 0))
-  (define (for-index-helper p ls i)
-    (if (null? ls)
-	'()
-	(cons (p i (car ls)) (for-index-helper p (cdr ls) (+ i 1)))))
-  
+  (define (for-string-index-end p s end)
+    (for-string-index-end-helper p s 0 end))
+  (define (for-string-index-end-helper p s i end)
+    (if (eq? i (string-length s))
+	end
+	(cons (p i (string-ref s i)) (for-string-index-end-helper p s (+ i 1) end))))
+
   ;; ====================== ;;
   ;; Apply representation   ;;
   ;; ====================== ;;
@@ -1224,14 +1226,21 @@
                                      (i32.shr_s ,(compile-expr (cadr args) env)
                                                 (i32.const ,(tag-size))))))
      ((eq? op '%store-mem)
-      ;; (%store-mem base offset value) | (%store-mem base offset)
-      `(i32.store (offset 0)
-                  (i32.add (i32.and ,(compile-expr (car args) env) (i32.const ,(fixnum-mask)))
-                           (i32.shr_s ,(compile-expr (cadr args) env)
-                                      (i32.const ,(tag-size))))
-                  . ,(if (null? (cddr args))
-                         '()
-                         `(,(compile-expr (caddr args) env)))))
+      ;; (%store-mem base offset value)
+      (let ((base (compile-expr (car args) env))
+            (offset (compile-expr (cadr args) env))
+            (value (if (null? (cddr args))
+                       '()
+                       `(,(compile-expr (caddr args) env)))))
+        (if (eq? (car offset) 'i32.const)
+            `(i32.store (offset ,(bitwise-arithmetic-shift-right (cadr offset) (tag-size)))
+                        ,base
+                        . ,value)
+            `(i32.store (offset 0)
+                        (i32.add ,base
+                                 (i32.shr_s ,offset
+                                            (i32.const ,(tag-size))))
+                        . ,value))))
      ((eq? op 'bitwise-and)
       (cons 'i32.and (compile-exprs args env)))
      ((eq? op 'bitwise-not)
