@@ -71,6 +71,7 @@
        (%wasm-import "rt" (error where what))
        (%wasm-import "rt" (%log-char c))
        (%wasm-import "rt" (%flush-log))
+       (%wasm-import "rt" (%open-as-stdin filename))
        (define (display x)
          ;; display, and all of the functions it calls, must not
          ;; allocate so that we can use it to debug allocation

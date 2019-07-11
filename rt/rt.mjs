@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import fs from 'fs';
+
 const TAG_SIZE = 3;
 const TAGS = {
     fixnum: 0,
@@ -131,6 +133,10 @@ function rt(engine) {
         '%flush-log': () => {
             console.info(engine.log);
             engine.log = "";
+        },
+        '%open-as-stdin': (filename) => {
+            filename = engine.jsFromScheme(filename);
+            engine.setCurrentInputPort(fs.readFileSync(filename));
         }
     }
 }
