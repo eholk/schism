@@ -520,6 +520,57 @@
     (and (pair? x) (memq (car x) '(bool char number null string))))
 
   ;; ====================== ;;
+  ;; Resolve Imports        ;;
+  ;; ====================== ;;
+  ;;
+  ;; See docs/libraries.md for more detail about what this pass does and how it works.
+  (define (read-imports lib)
+    (let ((name (cadr lib))
+          (imports (cdr (cadddr lib))))
+      (cons lib (read-library-list imports (cons name '())))))
+
+  (define (read-library-list library-names visited)
+    (if (null? library-names)
+        '()
+        (let* ((name (car library-names))
+               (lib (read-library name)))
+          ;; lib = (library name (export exports ...) (import imports...) body)
+          (let ((name (cadr lib))
+                (exports (cdaddr lib))
+                (imports (cdr (cadddr lib)))
+                (body (cdddr lib)))
+            (begin
+              (write "Loading library: ") (display name) (newline)
+              (write "Exports:  ") (display exports) (newline)
+              (write "Imports:  ") (display imports) (newline)
+              (newline)
+              (cons lib (read-library-list
+                         (append (filter-imports imports visited) (cdr library-names))
+                         (cons name visited))))))))
+
+  (define (read-library name)
+    (if (list-all-eq? name '(rnrs))
+        '(library
+             (rnrs)
+           (export)
+           (import))
+        (begin
+          (%open-as-stdin "./test/lib/import-test.ss")
+          (read))))
+
+  (define (filter-imports imports visited)
+    (if (null? imports)
+        '()
+        (if (find-library-name (car imports) visited)
+            (filter-imports (cdr imports) visited)
+            (cons (car imports) (filter-imports (cdr imports) visited)))))
+
+  (define (find-library-name name name-list)
+    (and (pair? name-list)
+         (or (list-all-eq? name (car name-list))
+             (find-library-name name (cdr name-list)))))
+  
+  ;; ====================== ;;
   ;; Parsing                ;;
   ;; ====================== ;;
   (define (expand-macros-quasiquote expr)
@@ -770,6 +821,16 @@
       (cons exports
             (append (parse-functions primitives primitives-env)
                     (parse-functions defs body-env)))))
+  (define (parse-libraries libs)
+    (let ((first (parse-library (car libs)))
+          (imported-functions (fold-left (lambda (functions lib)
+                                           (append functions
+                                                   (cdr (parse-library lib))))
+                                         '()
+                                         (cdr libs))))
+      (cons (car first) (append (cdr first) imported-functions))))
+
+  ;;(define (extract-exported-functions lib)  
 
   (define (expand-quote expr quasi)
     (cond
@@ -1797,19 +1858,20 @@
     (generate-module-from-package (compile-library->module-package library)))
   (define (compile-library->module-package library)
     ;; (parsed-lib : (exports . functions)
-    (let ((parsed-lib (parse-library (expand-macros library))))
-      (let ((exports (car parsed-lib)))
-        (let* ((simplified (simplify-functions (cdr parsed-lib)))
-               (closure-converted (convert-closures simplified))
-               (string-lowered (lower-strings closure-converted))
-               (function-names (functions->names closure-converted))
-               (types (functions->types closure-converted))
-	       (type-ids (functions->type-ids closure-converted types))
-               (compiled-module (compile-functions
-                                 (apply-representation string-lowered))))
-          (let ((exports (build-exports exports string-lowered 0))
-                (imports (gather-imports compiled-module types)))
-            `(,types ,exports ,imports ,compiled-module ,function-names ,type-ids))))))
+    (let* ((libraries (read-imports library))
+           (parsed-lib (parse-libraries (map expand-macros libraries)))
+           (exports (car parsed-lib))
+           (simplified (simplify-functions (cdr parsed-lib)))
+           (closure-converted (convert-closures (cdr parsed-lib)))
+           (string-lowered (lower-strings closure-converted))
+           (function-names (functions->names string-lowered))
+           (types (functions->types string-lowered))
+           (type-ids (functions->type-ids string-lowered types))
+           (compiled-module (compile-functions
+                             (apply-representation string-lowered))))
+      (let ((exports (build-exports exports string-lowered 0))
+            (imports (gather-imports compiled-module types)))
+        `(,types ,exports ,imports ,compiled-module ,function-names ,type-ids))))
   (define (generate-module-from-package package)
     (let ((types (car package))
           (exports (cadr package))
