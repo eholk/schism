@@ -289,6 +289,18 @@
          (or (>= i (string-length s1))
              (and (eq? (string-ref s1 i) (string-ref s2 i))
                   (string-equal-loop s1 s2 (+ i 1)))))
+       (define (string-append s1 s2)
+         (let ((s (make-string (+ (string-length s1) (string-length s2)))))
+           (begin
+             (copy-string-to! s 0 s1 0)
+             (copy-string-to! s (string-length s1) s2 0)
+             s)))
+       (define (copy-string-to! target target-ptr source source-ptr)
+         (if (< source-ptr (string-length source))
+             (begin
+               (string-set! target target-ptr (string-ref source source-ptr))
+               (copy-string-to! target (+ 1 target-ptr) source (+ 1 source-ptr)))
+             (begin)))
        (define (hash-string s i h)
          (if (eq? i (string-length s))
              h
